@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>视线出屏检测</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a2332;
+      --border: #2d3a4f;
+      --text: #e7ecf3;
+      --muted: #8b98a8;
+      --primary: #3b82f6;
+      --success: #22c55e;
+      --danger: #ef4444;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: radial-gradient(circle at top, #1e293b 0%, var(--bg) 42%);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    .page { max-width: 1280px; margin: 0 auto; padding: 24px; }
+    header { display: flex; justify-content: space-between; gap: 16px; align-items: center; margin-bottom: 20px; }
+    h1 { margin: 0; font-size: 1.5rem; }
+    header p { margin: 6px 0 0; color: var(--muted); }
+    .badge {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 8px 14px; border-radius: 999px; border: 1px solid var(--border);
+      background: rgba(255,255,255,0.03); white-space: nowrap;
+    }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); }
+    .dot.ready { background: var(--success); }
+    .dot.error { background: var(--danger); }
+    .layout { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 20px; }
+    @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+    .panel {
+      background: rgba(26, 35, 50, 0.92);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 18px;
+      min-width: 0;
+    }
+    h2 { margin: 0 0 14px; font-size: 1.05rem; }
+    label { display: block; margin: 12px 0 6px; color: var(--muted); font-size: 0.85rem; }
+    input {
+      width: 100%; padding: 10px 12px; border-radius: 10px;
+      border: 1px solid var(--border); background: #111827; color: var(--text);
+    }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+    button {
+      border: none; border-radius: 10px; padding: 10px 16px; cursor: pointer; color: white;
+      background: var(--primary);
+    }
+    button.secondary { background: #334155; }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    .message {
+      margin-top: 14px; padding: 10px 12px; border-radius: 10px; min-height: 42px;
+      background: rgba(59, 130, 246, 0.12); border: 1px solid rgba(59, 130, 246, 0.25);
+    }
+    .message.error { background: rgba(239, 68, 68, 0.12); border-color: rgba(239, 68, 68, 0.25); }
+    .stage { position: relative; background: #05080d; border-radius: 12px; overflow: hidden; min-height: 360px; }
+    canvas, video { width: 100%; height: auto; display: block; }
+    video { display: none; }
+    .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 14px; }
+    .metric { padding: 10px; border-radius: 10px; background: #111827; }
+    .metric span { display: block; color: var(--muted); font-size: 0.78rem; }
+    .metric strong { font-size: 1.05rem; }
+    .still { margin-top: 16px; }
+    .hint { color: var(--muted); font-size: 0.85rem; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header>
+      <div>
+        <h1>视线出屏检测</h1>
+        <p>摄像头画面实时叠加人脸框、视线箭头和是否看向屏幕外。</p>
+      </div>
+      <div class="badge"><span id="statusDot" class="dot"></span><span id="providerText">正在加载模型</span></div>
+    </header>
+    <div class="layout">
+      <section class="panel">
+        <h2>判定窗口</h2>
+        <p class="hint">窗口内算屏幕内。正俯仰朝画面上，正偏航朝画面右。摄像头在屏幕上沿时，俯仰多为负值。</p>
+        <label for="pitchRange">俯仰窗口（度）</label>
+        <input id="pitchRange" value="-30,5">
+        <label for="yawRange">偏航窗口（度）</label>
+        <input id="yawRange" value="-22,22">
+        <div class="actions">
+          <button id="startCamera" disabled>打开摄像头</button>
+          <button id="stopCamera" class="secondary" disabled>停止</button>
+        </div>
+        <label for="imageFile">单张图片</label>
+        <input id="imageFile" type="file" accept="image/*">
+        <div class="actions">
+          <button id="detectFile" class="secondary" disabled>检测图片</button>
+        </div>
+        <div id="message" class="message">正在加载模型…</div>
+        <div class="metrics">
+          <div class="metric"><span>画面</span><strong id="screenState">—</strong></div>
+          <div class="metric"><span>检测速度</span><strong id="detectRate">—</strong></div>
+          <div class="metric"><span>俯仰</span><strong id="pitchValue">—</strong></div>
+          <div class="metric"><span>偏航</span><strong id="yawValue">—</strong></div>
+        </div>
+      </section>
+      <section class="panel">
+        <h2>实时画面</h2>
+        <div class="stage">
+          <video id="cameraVideo" playsinline muted></video>
+          <canvas id="cameraCanvas"></canvas>
+        </div>
+        <div class="still">
+          <h2>图片结果</h2>
+          <div class="stage">
+            <canvas id="stillCanvas"></canvas>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+  <script>
+    const els = {
+      dot: document.getElementById("statusDot"),
+      provider: document.getElementById("providerText"),
+      pitchRange: document.getElementById("pitchRange"),
+      yawRange: document.getElementById("yawRange"),
+      startCamera: document.getElementById("startCamera"),
+      stopCamera: document.getElementById("stopCamera"),
+      imageFile: document.getElementById("imageFile"),
+      detectFile: document.getElementById("detectFile"),
+      message: document.getElementById("message"),
+      screenState: document.getElementById("screenState"),
+      detectRate: document.getElementById("detectRate"),
+      pitchValue: document.getElementById("pitchValue"),
+      yawValue: document.getElementById("yawValue"),
+      video: document.getElementById("cameraVideo"),
+      cameraCanvas: document.getElementById("cameraCanvas"),
+      stillCanvas: document.getElementById("stillCanvas"),
+    };
+
+    let ready = false;
+    let cameraRunning = false;
+    let stream = null;
+    let lastResult = null;
+    let frameTimes = [];
+    const captureCanvas = document.createElement("canvas");
+
+    function setMessage(text, isError) {
+      els.message.textContent = text;
+      els.message.classList.toggle("error", !!isError);
+    }
+
+    function ranges() {
+      return {
+        pitch_range: els.pitchRange.value.trim(),
+        yaw_range: els.yawRange.value.trim(),
+      };
+    }
+
+    function drawArrow(ctx, x1, y1, x2, y2) {
+      const angle = Math.atan2(y2 - y1, x2 - x1);
+      const head = Math.max(10, ctx.lineWidth * 4);
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(x2, y2);
+      ctx.lineTo(x2 - head * Math.cos(angle - Math.PI / 6), y2 - head * Math.sin(angle - Math.PI / 6));
+      ctx.lineTo(x2 - head * Math.cos(angle + Math.PI / 6), y2 - head * Math.sin(angle + Math.PI / 6));
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    function drawOverlay(ctx, result) {
+      if (!result || !result.face_box) return;
+      const [x, y, w, h] = result.face_box;
+      const outside = !!result.looking_outside;
+      ctx.strokeStyle = outside ? "#ef4444" : "#22c55e";
+      ctx.fillStyle = ctx.strokeStyle;
+      ctx.lineWidth = Math.max(2, ctx.canvas.width / 240);
+      ctx.strokeRect(x, y, w, h);
+      if (result.pitch == null || result.yaw == null) return;
+      const cx = x + w / 2;
+      const cy = y + h / 2;
+      const length = Math.max(w, h) * 0.85;
+      const yaw = result.yaw * Math.PI / 180;
+      const pitch = result.pitch * Math.PI / 180;
+      drawArrow(ctx, cx, cy, cx + length * Math.sin(yaw), cy - length * Math.sin(pitch));
+      const direction = result.directions && result.directions.length ? result.directions.join("") : "";
+      const label = `${result.message}  俯仰 ${Number(result.pitch).toFixed(1)}°  偏航 ${Number(result.yaw).toFixed(1)}° ${direction}`;
+      ctx.font = `${Math.max(16, Math.round(ctx.canvas.width / 42))}px sans-serif`;
+      ctx.fillText(label, x, Math.max(28, y - 10));
+    }
+
+    function showNumbers(result) {
+      if (!result) {
+        els.screenState.textContent = "—";
+        els.pitchValue.textContent = "—";
+        els.yawValue.textContent = "—";
+        return;
+      }
+      els.screenState.textContent = result.message || "—";
+      els.screenState.style.color = result.looking_outside ? "#ef4444" : (result.pitch == null ? "#e7ecf3" : "#22c55e");
+      els.pitchValue.textContent = result.pitch == null ? "—" : `${Number(result.pitch).toFixed(1)}°`;
+      els.yawValue.textContent = result.yaw == null ? "—" : `${Number(result.yaw).toFixed(1)}°`;
+    }
+
+    function paintCamera() {
+      if (!cameraRunning) return;
+      const video = els.video;
+      const canvas = els.cameraCanvas;
+      if (video.videoWidth) {
+        if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+        }
+        const ctx = canvas.getContext("2d");
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.save();
+        ctx.translate(canvas.width, 0);
+        ctx.scale(-1, 1);
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        ctx.restore();
+        drawOverlay(ctx, lastResult);
+      }
+      requestAnimationFrame(paintCamera);
+    }
+
+    async function postFrame(blob, source) {
+      const form = new FormData();
+      const current = ranges();
+      form.append("file", blob, "frame.jpg");
+      form.append("pitch_range", current.pitch_range);
+      form.append("yaw_range", current.yaw_range);
+      form.append("source", source);
+      const response = await fetch("/api/gaze/image", { method: "POST", body: form });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || payload.message || response.statusText);
+      return payload;
+    }
+
+    function captureMirrored() {
+      const video = els.video;
+      captureCanvas.width = video.videoWidth;
+      captureCanvas.height = video.videoHeight;
+      const ctx = captureCanvas.getContext("2d");
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.translate(captureCanvas.width, 0);
+      ctx.scale(-1, 1);
+      ctx.drawImage(video, 0, 0);
+      return new Promise((resolve) => captureCanvas.toBlob(resolve, "image/jpeg", 0.8));
+    }
+
+    async function detectLoop() {
+      while (cameraRunning) {
+        if (!els.video.videoWidth) {
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          continue;
+        }
+        try {
+          const blob = await captureMirrored();
+          if (!blob || !cameraRunning) continue;
+          const payload = await postFrame(blob, "camera");
+          if (!cameraRunning) break;
+          lastResult = payload.result;
+          showNumbers(lastResult);
+          const now = performance.now();
+          frameTimes.push(now);
+          frameTimes = frameTimes.filter((time) => now - time < 1000);
+          els.detectRate.textContent = `${frameTimes.length} 次/秒`;
+          setMessage(payload.message || "检测完成", false);
+        } catch (err) {
+          setMessage(`检测失败: ${err.message || err}`, true);
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+      }
+    }
+
+    async function stopCamera() {
+      cameraRunning = false;
+      if (stream) {
+        stream.getTracks().forEach((track) => track.stop());
+        stream = null;
+      }
+      els.video.srcObject = null;
+      els.startCamera.disabled = !ready;
+      els.stopCamera.disabled = true;
+      lastResult = null;
+      frameTimes = [];
+      els.detectRate.textContent = "—";
+      showNumbers(null);
+      await fetch("/api/gaze/reset", { method: "POST" }).catch(() => {});
+    }
+
+    async function refreshStatus() {
+      const response = await fetch("/api/gaze/status");
+      const status = await response.json();
+      ready = !!status.initialized;
+      els.provider.textContent = status.provider ? `执行器 ${status.provider}` : (status.message || "未就绪");
+      els.dot.classList.toggle("ready", ready);
+      els.dot.classList.toggle("error", !!status.error);
+      els.startCamera.disabled = !ready || cameraRunning;
+      els.detectFile.disabled = !ready;
+      setMessage(status.error || status.message || "就绪", !!status.error);
+    }
+
+    els.startCamera.addEventListener("click", async () => {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
+          audio: false,
+        });
+        els.video.srcObject = stream;
+        await els.video.play();
+        cameraRunning = true;
+        els.startCamera.disabled = true;
+        els.stopCamera.disabled = false;
+        setMessage("摄像头已打开，检测结果会叠在画面上", false);
+        requestAnimationFrame(paintCamera);
+        detectLoop();
+      } catch (err) {
+        setMessage(`开启摄像头失败: ${err.message || err}`, true);
+      }
+    });
+
+    els.stopCamera.addEventListener("click", () => {
+      stopCamera().then(() => setMessage("摄像头已停止", false));
+    });
+
+    els.detectFile.addEventListener("click", () => {
+      const file = els.imageFile.files && els.imageFile.files[0];
+      if (!file) {
+        setMessage("请先选择图片", true);
+        return;
+      }
+      if (file.size > 20 * 1024 * 1024) {
+        setMessage("图片超过 20MB", true);
+        return;
+      }
+      const url = URL.createObjectURL(file);
+      const image = new Image();
+      image.onload = async () => {
+        const canvas = els.stillCanvas;
+        canvas.width = image.naturalWidth;
+        canvas.height = image.naturalHeight;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(image, 0, 0);
+        URL.revokeObjectURL(url);
+        const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.92));
+        try {
+          const payload = await postFrame(blob, "image");
+          drawOverlay(ctx, payload.result);
+          const still = payload.result || {};
+          const angles = still.pitch == null
+            ? ""
+            : ` 俯仰 ${Number(still.pitch).toFixed(1)}° 偏航 ${Number(still.yaw).toFixed(1)}°`;
+          if (!cameraRunning) showNumbers(still);
+          setMessage(`图片${still.message || "检测完成"}${angles}`, false);
+        } catch (err) {
+          setMessage(`检测失败: ${err.message || err}`, true);
+        }
+      };
+      image.onerror = () => {
+        URL.revokeObjectURL(url);
+        setMessage("图片无法显示", true);
+      };
+      image.src = url;
+    });
+
+    refreshStatus().catch((err) => setMessage(`状态获取失败: ${err.message || err}`, true));
+  </script>
+</body>
+</html>
